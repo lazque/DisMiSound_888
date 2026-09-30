@@ -1,0 +1,6 @@
+id=DisMiSound_888s
+name=［小米 888 系列］音频通路优化
+version=260930
+versionCode=260930
+author=酷安坠欢啊
+description=酷安坠欢啊自研模块，二改需本人认可。小米 888 系（米11/11Pro·Ultra/K40Pro/MIX4）音频通路优化：重排放音与通话增益、移植高规格声学校准、开启高码率与硬件offload、降低音频延迟、优化蓝牙编解码，支持 Magisk/KernelSU/APatch。
