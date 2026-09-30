@@ -141,18 +141,7 @@ android.hardware.audio.pro
 声明之后系统会把本机识别为「低延迟音频设备」和「专业音频设备」，各类播放器、USB 音频、录音类 APP 会自动切到高速通道，相关的能力限制也会一并放开。
 
 ---
-
-## 八、补齐米音音效面板
-
-```text
-/system/priv-app/MusicFX（com.miui.audioeffect）
-```
-
-部分第三方 ROM 把这个 App 精简掉了，音效设置进去是空的或者干脆打不开。模块把它补回去，调节界面可以正常使用。
-
----
-
-## 九、系统属性：把 HAL 的能力全部打开
+## 八、系统属性：把 HAL 的能力全部打开
 
 ### 高码率输出
 
@@ -250,7 +239,7 @@ offload 能力里集齐 aptX TWS / aptX HD / aptX Adaptive R2 / LDAC / LHDC / LC
 
 ---
 
-## 十、开关
+## 九、开关
 
 在模块目录放同名空文件，重启生效；删掉文件重启即回默认。
 
@@ -264,7 +253,7 @@ offload 能力里集齐 aptX TWS / aptX HD / aptX Adaptive R2 / LDAC / LHDC / LC
 
 ---
 
-## 十一、安装
+## 十、安装
 
 1. 卸载旧版同名模块
 2. 在管理器里刷入本模块
