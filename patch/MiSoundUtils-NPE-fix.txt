@@ -1,0 +1,207 @@
+音质音效（com.miui.misound）闪退修复记录
+坠欢 2026.10.2
+==========================================================================
+
+一、现象
+--------------------------------------------------------------------------
+澎湃 OS 4（秋城落叶 odin 版，Android 17）上打开官方「音质音效」立刻 FC：
+
+    AndroidRuntime: FATAL EXCEPTION: main
+    AndroidRuntime: Process: com.miui.misound, PID: 17724
+    AndroidRuntime: java.lang.NullPointerException: Attempt to invoke virtual method
+                    'void d0.e.g()' on a null object reference
+      at d0.d.F(...)                      <- MiSoundUtils.initMiSoundIfNeed()
+      at d0.d.i(...)                      <- MiSoundUtils.isEnabled(Context)
+      at h.i.F0(...)                      <- HeadsetSettings.getEnabledEffect()
+      at h.i.X0(...)                      <- HeadsetSettings.updateEffectSelectionPreference()
+      at h.i.Y0(...)                      <- HeadsetSettings.updatePreference()
+      at h.i.onCreatePreferences(...)
+      at androidx.preference.PreferenceFragmentCompat.onCreate(...)
+
+对应 APK：versionName 16-4.0-4-20260903，package com.miui.misound。
+
+
+二、定位
+--------------------------------------------------------------------------
+反编译 classes.dex，三个关键类：
+
+    h.i   = HeadsetSettings（设置页 Fragment）
+    d0.c  = DiracUtils 基类，r() 按 ro.vendor.audio.soundfx.type 选实现
+    d0.d  = MiSoundUtils（本机型走的就是它）
+    d0.e  = MiSoundWrapper：反射 android.media.audiofx.MiSound
+
+崩溃发生在 MiSoundUtils 自己身上，是两处缺陷叠加：
+
+缺陷 1 —— initialize() 先置标志位，再创建对象
+
+    public void g() {                       // initialize()
+        Log.i(TAG, "initialize, mInitialized=" + c);
+        if (!c) {
+            c = true;                       // ← 还没创建就先置 true
+            try {
+                b = new d0.e(0, 0);         // new MiSound(0, 0)
+            } catch (Exception e) {
+                Log.e(TAG, "MiSoundUtils initialize() fail: ", e);
+            }                               // ← catch 里没有把 c 复位
+        }
+    }
+
+MiSound 创建只要失败一次（反射不到类 / AudioEffect 引擎当时起不来 /
+effect 实例数打满），异常被吞掉只留一行 log，但 c 已经是 true，
+g() 从此变成空转，b（mMiSound）永久为 null。
+
+缺陷 2 —— initMiSoundIfNeed() 直接解引用，没判空也没 catch
+
+    public void F() {                       // initMiSoundIfNeed()
+        if (!E()) {                         // E() = hasControl()
+            Log.d(TAG, "initMiSoundIfNeed: init");
+            b.g();                          // ← 崩溃点：b 为 null，直接 NPE
+            c = false;
+            g();
+        }
+    }
+
+而 hasControl() 内部把 NPE 当普通 Exception 吞掉了，返回 false：
+
+    public boolean E() {
+        if (b == null) {
+            Log.e(TAG, "hasControl: mMiSound == null");
+            c = false;
+            g();                            // 想重建，但缺陷 1 导致重建不了
+        }
+        try {
+            return b.e();                   // NPE 在这里产生
+        } catch (Exception e) {
+            Log.e(TAG, "hasControl() false, exception: ", e);
+            return false;                   // 被吞掉，返回 false
+        }
+    }
+
+完整链路：
+    MiSound 创建失败
+      -> initialize() 标志位卡死，mMiSound 恒为 null
+      -> hasControl() 抛 NPE 被吞，返回 false
+      -> initMiSoundIfNeed() 直接 mMiSound.release()，NPE 抛到 catch 之外
+      -> 主线程崩溃，App 每次打开必崩
+
+也就是说：只要 MiSound 有一次没起来，之后无论重启多少次 App 都是必崩。
+isEnabled() 之类的调用点本来是有 try/catch 的，唯独 F() 这一处没有。
+
+
+三、修法（改 classes.dex，两处）
+--------------------------------------------------------------------------
+1) initialize()：只有真正 new 成功才置 mInitialized；失败必须复位，
+   让下次还能重试。同时把 catch 里的 move-exception 从 p0 挪到 v2，
+   否则 catch 块里拿不到 this，没法写字段。
+
+    :try_start_0
+    new-instance v0, Ld0/e;
+    const/4 v2, 0x0
+    invoke-direct {v0, v2, v2}, Ld0/e;-><init>(II)V
+    iput-object v0, p0, Ld0/d;->b:Ld0/e;
+    const/4 v2, 0x1
+    iput-boolean v2, p0, Ld0/d;->c:Z      # 成功后才置位
+    :try_end_0
+    .catch Ljava/lang/Exception; {:try_start_0 .. :try_end_0} :catch_0
+    ...
+    :catch_0
+    move-exception v2                      # 原来是 move-exception p0
+    const-string v0, "MiSoundUtils initialize() fail: "
+    invoke-static {v1, v0, v2}, Landroid/util/Log;->e(...)I
+    const/4 v0, 0x0
+    iput-boolean v0, p0, Ld0/d;->c:Z       # 失败复位，下次还能重建
+
+2) initMiSoundIfNeed()：release 前判空 + 包 try/catch，MiSound 不可用时
+   优雅降级（音效开关显示不可用），而不是直接 FC。
+
+    iget-object v1, p0, Ld0/d;->b:Ld0/e;
+    if-eqz v1, :cond_skip_release
+    :try_start_0
+    invoke-virtual {v1}, Ld0/e;->g()V
+    :try_end_0
+    .catch Ljava/lang/Exception; {:try_start_0 .. :try_end_0} :catch_release
+    goto :cond_skip_release
+    :catch_release
+    move-exception v2
+    const-string v1, "initMiSoundIfNeed release fail: "
+    invoke-static {v0, v1, v2}, Landroid/util/Log;->e(...)I
+    :cond_skip_release
+    const/4 v0, 0x0
+    iput-boolean v0, p0, Ld0/d;->c:Z
+    invoke-virtual {p0}, Ld0/d;->g()V
+
+
+四、打包说明
+--------------------------------------------------------------------------
+* 只替换 classes.dex，其余 1918 个条目（resources.arsc、AndroidManifest、
+  res/、lib/、assets/）全部保持原样，逐条 CRC 校验一致。
+* dex 版本按 minSdk 33 重新生成为 040（原包是 039，直接用默认 035 会让
+  私有接口方法触发 "Interface virtual method ... is not public" 校验告警）。
+* 重新签名（自签 DisMiSound 证书），v1 + v2 + v3 全开，zipalign 4 对齐。
+* 因为签名变了，覆盖系统 App 后系统级权限会被收回，模块 service.sh 里
+  已经用 pm grant 补发 WRITE_SECURE_SETTINGS / MODIFY_AUDIO_ROUTING /
+  BLUETOOTH_PRIVILEGED 等，补发失败时写入 mount.log 便于排查。
+
+原始 APK 签名证书：CN=MIUI, OU=MIUI, O=Xiaomi（小米系统应用签名）
+修复版签名证书：CN=DisMiSound, OU=DisMiSound, O=DisMiSound（自签）
+
+
+==========================================================================
+第二轮（fix3）：音效引擎起不来导致的第二个崩溃 + MiSound 反射被 hiddenapi 拦
+==========================================================================
+
+修掉 NPE 之后 App 往前走了一步，又崩在另一处：
+
+    java.lang.RuntimeException: Cannot initialize effect engine for type:
+      ec7178ec-e5e1-4432-a3f4-4657e6795210 Error: -3
+      at android.media.audiofx.AudioEffect.<init>(AudioEffect.java:555)
+      at e.a.<init>(...:7)          <- 自带 DiracSound（extends AudioEffect）
+      at h.i.Y0(...:198)           <- E0() 被内联进 Y0
+      at h.i.onCreatePreferences(...:357)
+
+同一时刻系统侧的真因：
+
+    E EffectFactoryHAL: Error querying effect descriptor for
+      9d4921da-8225-4f29-aefa-39537a04bcaa: No such file or directory
+    W AudioFlinger: createEffect() error -2 from getEffectDescriptor
+    E AudioEffects-JNI: AudioEffect initCheck failed -3
+
+`9d4921da-...` 是 EFFECT_TYPE_NULL，连空类型都查不到，
+说明整个 EffectsFactoryHAL 没拿到配置，任何 AudioEffect 都建不起来。
+日志里同时能看到：
+
+    I KernelSU: ksu_handle_umount: unmounting: /vendor/etc/audio_effects.xml
+
+KernelSU 的「卸载模块挂载」把本模块挂上去的 audio_effects.xml 撤掉了，
+HAL 读回原厂那份（那份在这台移植包上会让 EffectFactoryHAL 报 ENOENT），
+于是 Dirac / Dolby 引擎全起不来，而 App 建 DiracSound 时没有 try/catch。
+
+修法（两处）：
+1) e/a（DiracSound）<init>：给 super(...) 包 try/catch。
+   引擎起不来时记录日志、把有效标记置 false、锁对象照样初始化，
+   然后正常返回 —— 对象还在，hasControl() 后续会走 IllegalStateException
+   分支返回 false，页面只是显示不可用，不再 FC。
+2) h/i 的 E0() 与 Y0 里 new e.a(0,0) 的两处调用点也各包一层 try/catch，
+   并把 i0 为 null 的情况在 D0()、Y0(:cond_6) 处挡掉，
+   防止万一第 1 步被 ART 校验拒绝时还有兜底。
+
+==========================================================================
+第三轮：MiSound 反射被 hiddenapi 拦住
+==========================================================================
+
+    E om.miui.misound: hiddenapi: Accessing hidden method
+      Landroid/media/audiofx/MiSound;-><init>(II)V
+      (runtime_flags=0, domain=platform, api=blocked) from Ld0/e;
+    E MiSoundUtils: MiSoundUtils initialize() fail:
+    E MiSoundUtils: java.lang.NoSuchMethodException:
+      android.media.audiofx.MiSound.<init> [int, int]
+
+覆盖安装后签名变了，原来的平台签名豁免没了，反射不到 MiSound 的构造函数。
+（方法本身是存在的，只是被拦。）
+
+修法：新增 d0/e.z()，在 <init> 反射之前先用「元反射」
+（Class.class.getDeclaredMethod 拿到的 Method 对象再去取目标方法，
+反射起点是 java.lang.Class，不受 domain 检查限制）调用
+dalvik.system.VMRuntime.setHiddenApiExemptions(new String[]{"L"})，
+把所有 hidden api 一次性放开。整个过程包在 try/catch 里，失败也只是
+退回原来的「米音不可用」，不会引入新的崩溃。

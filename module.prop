@@ -1,0 +1,6 @@
+id=DisMiSound_888s
+name=［小米 888 系列］音频通路优化
+version=2026.10.11
+versionCode=20261011
+author=酷安坠欢啊
+description=酷安坠欢啊自研模块，二改需本人认可。小米mix4音频优化模块，音频通路优化：重排放音与通话增益、移植高规格声学校准、开启高码率与硬件offload、降低音频延迟、优化蓝牙编解码，支持 Magisk/KernelSU/APatch。｜2026.10.11：修复 Magisk 面具刷入报 Unzip error（补回 META-INF 安装器）；修复小米11 Ultra 蓝牙失效（耳机/车载媒体与通话全从扬声器出声，默认不再整包替换音频策略，屏录修复改由自适应注入完成）；修复 MIUI14 刷入卡第一屏（MIUI 自动进兼容档，只挂 acdb/固件/mixer overlay 等安全项）；融合小米10s 028黑鲨混搭音效包（建 mi10s_fx 开启，含 soundfx 音效库/DSP 资源/MusicFX），新增 acdb_thyme 换用小米10s 声学校准。

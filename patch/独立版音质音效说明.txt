@@ -1,0 +1,129 @@
+独立版「音质音效」 com.dismisound.audiofx
+坠欢 2026.10.2
+==========================================================================
+
+一、为什么单独开一个
+--------------------------------------------------------------------------
+官方 com.miui.misound 在这台移植包上有两道坎：
+
+1. 反射 android.media.audiofx.MiSound 被 hiddenapi 拦（重签名后必现，
+   原签名是平台签名，我们换成自签之后豁免就没了）；
+2. 建 DiracSound 时音效 HAL 起不来就抛异常，App 没有 try/catch，直接 FC。
+
+覆盖系统 App 能把这两道坎都跨过去，但代价是换签名带来的权限/豁免损失。
+所以再给一条更干净的路：**独立包名的 App，跟系统那个互不干扰**。
+
+- 包名：com.dismisound.audiofx
+- 不覆盖任何系统文件，卸载模块后可以直接当普通 App 卸掉
+- 和官方 App 读写的是同一批 key，两个 App 之间状态是同步的
+
+
+二、界面
+--------------------------------------------------------------------------
+按 HyperOS 设置页的样式做的：灰底 + 圆角白卡片，分组标题 + 开关行 /
+单选行 / 跳转行，单选点开是单选对话框（和官方下拉偏好一个交互）。
+跟随系统深色模式。
+
+分四组：
+
+  音效
+    使用米音提升音质          总开关
+    音效选择                  无 / 米音 / 哈曼卡顿 / 杜比音效
+
+  音质增强
+    使用Hi-Fi高保真播放
+    3D环绕
+    空间音频
+    低音增强
+
+  耳机
+    图形均衡器                预设 + 10 段手动微调（31Hz~16kHz）
+    耳机类型设置
+    场景选择
+
+  DisMiSound 模块
+    模块状态（版本号）
+    哈曼卡顿
+    force_harman / misound_full / tx_off / tx_high / rx_max / no_acdb
+    重新挂载音频配置
+    挂载日志
+
+
+三、功能实现：三条通道并存
+--------------------------------------------------------------------------
+官方 App 自己也是在三个地方写东西，这里照抄，哪条在这台机器上活着
+就哪条生效，任何一条抛异常都不影响其它两条：
+
+1) Settings.Global
+     misound_active / dirac_enabled      米音总开关
+     effect_implementer                  音效实施者：none/misound/harmankardon/dolby
+     settings_system_harman_kardon_enable 哈曼卡顿
+     hifi_enable / hifi_mode             Hi-Fi
+     effect_3d_surround_switch           3D 环绕
+     spatial_audio_feature_enable        空间音频
+     settings_system_speaker_scenario_value  场景
+     dirac_last_headset_type             耳机类型
+     dirac_eq_current                    均衡器预设
+
+2) AudioManager.setParameters
+     dirac_enabled=0/1
+     hifi_mode=0/1
+     diracband=N;value=F                 均衡器每一段（官方就是这么下发的）
+
+3) android.media.audiofx.MiSound 反射
+     setMusic / getMusic / setHeadsetType / setScenario /
+     setHifiMode / setLevel / hasControl
+     进入 App 之前先做 hidden api 豁免（元反射调
+     VMRuntime.setHiddenApiExemptions），拿不到就整体降级，不崩。
+
+写 Settings.Global 需要 WRITE_SECURE_SETTINGS，模块 service.sh 开机时会
+pm grant 给这个包；补不上时 App 会提示，并且自动退回 su 执行 settings put。
+
+
+四、和模块的联动
+--------------------------------------------------------------------------
+- 模块 service.sh：没装就 pm install，装了就补权限
+- 「哈曼卡顿」开关打开时，除了写 Settings.Global，还会通过 su 执行
+  setprop ro.vendor.audio.sfx.harmankardon true，把属性也一起给上
+- 模块开关那几个（force_harman / misound_full / tx_off / tx_high /
+  rx_max / no_acdb）就是模块目录里的同名空文件，App 用 su 增删
+- 「重新挂载音频配置」直接跑一遍 post-fs-data.sh，不用重启
+- 「挂载日志」读的是 mount.log + record_fix_report.txt
+
+
+五、源码与二次构建
+--------------------------------------------------------------------------
+纯框架 API，没有任何第三方依赖（不用 AndroidX / miuix），
+所以 38KB 就能装下。源码结构：
+
+    AndroidManifest.xml
+    res/values/strings.xml      （文案与官方对齐）
+    res/values/colors.xml + values-night/colors.xml
+    res/values/styles.xml
+    res/layout/*.xml
+    src/com/dismisound/audiofx/
+        MainActivity.java       主界面与回调分发
+        EqualizerActivity.java  图形均衡器
+        LogActivity.java        日志与当前生效值
+        Ui.java                 卡片行构造
+        Fx.java                 Settings / AudioManager / MiSound 三通道
+        MiSoundFx.java          MiSound 反射封装
+        HiddenApi.java          hidden api 豁免
+        ModuleBridge.java       与模块目录交互（走 su）
+
+构建（不需要 Android Studio）：
+
+    aapt2 compile --dir res -o res.zip
+    aapt2 link -I android.jar --manifest AndroidManifest.xml \
+        -o app.apk res.zip --java gen --min-sdk-version 26 --target-sdk-version 33
+    javac -encoding UTF-8 -source 8 -target 8 -classpath android.jar \
+        -d obj gen/com/dismisound/audiofx/R.java src/com/dismisound/audiofx/*.java
+    java -cp d8.jar com.android.tools.r8.D8 --lib android.jar --min-api 26 \
+        --output build obj/com/dismisound/audiofx/*.class
+    aapt add app.apk build/classes.dex
+    zipalign -p -f 4 app.apk aligned.apk
+    apksigner sign --ks ks.jks ... --out DisMiSoundAudioFX.apk aligned.apk
+
+注意：本机 build-tools 33 自带的 d8（R8 3.3）解析不了 JDK 21 编译出来的
+**匿名内部类**（报 NullPointerException: String.length()），
+所以代码里所有监听器都用命名类 + view tag 分发，别改回匿名内部类。
